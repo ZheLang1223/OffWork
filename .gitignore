@@ -1,0 +1,13 @@
+# Personal work-time data and backups
+工时记录.xlsx
+backups/
+待同步.json
+holidays.json
+
+# Build output
+bin/
+obj/
+dist/
+*.pdb
+/下班了.exe
+/下班了.exe.config
