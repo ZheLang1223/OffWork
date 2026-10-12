@@ -1152,7 +1152,7 @@ namespace WorkTimeApp
             Dpi = new DpiMetrics(this);
             SetStyle(ControlStyles.ResizeRedraw, true);
             this.DoubleBuffered = true;
-            this.BackColor = ColorTranslator.FromHtml("#F1F5F9");
+            this.BackColor = Color.White;
             this.Cursor = Cursors.Hand;
             this.FlatStyle = FlatStyle.Flat;
             this.FlatAppearance.BorderSize = 0;
@@ -1198,13 +1198,15 @@ namespace WorkTimeApp
         public double Percentage
         {
             get => percentage;
-            set { percentage = Math.Max(0.0, Math.Min(100.0, value)); Invalidate(); }
+            set { percentage = double.IsNaN(value) || double.IsInfinity(value) ? 0.0 : Math.Max(0.0, value); Invalidate(); }
         }
 
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public Color TrackColor { get; set; } = ColorTranslator.FromHtml("#E2E8F0");
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public Color FillColor { get; set; } = ColorTranslator.FromHtml("#2563EB");
+        private readonly Color completedColor = ColorTranslator.FromHtml("#16A34A");
+        private readonly Color excessColor = ColorTranslator.FromHtml("#F59E0B");
 
         public ModernProgressBar()
         {
@@ -1229,14 +1231,26 @@ namespace WorkTimeApp
                 g.FillPath(brush, path);
             }
 
-            int fillW = (int)Math.Round((this.Width - 1) * (Percentage / 100.0));
+            int fillW = (int)Math.Round((this.Width - 1) * (Math.Min(100.0, Percentage) / 100.0));
             if (fillW > 4)
             {
                 var fillRect = new Rectangle(0, 0, fillW, this.Height - 1);
                 using (var fillPath = UiHelper.GetRoundedPath(fillRect, r))
-                using (var brush = new SolidBrush(FillColor))
+                using (var brush = new SolidBrush(Percentage >= 100.0 ? completedColor : FillColor))
                 {
                     g.FillPath(brush, fillPath);
+                }
+            }
+            int excessW = (int)Math.Round((Width - 1) * Math.Min(100.0, Math.Max(0.0, Percentage - 100.0)) / 100.0);
+            if (excessW > 0)
+            {
+                using (var path = UiHelper.GetRoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), r))
+                using (var brush = new SolidBrush(excessColor))
+                {
+                    var previousClip = g.Save();
+                    g.SetClip(path, CombineMode.Intersect);
+                    g.FillRectangle(brush, 0, 0, excessW, Height - 1);
+                    g.Restore(previousClip);
                 }
             }
         }
@@ -1257,6 +1271,8 @@ namespace WorkTimeApp
 
         private bool hoverStart = false;
         private bool hoverFinish = false;
+        private bool hoverStartTime;
+        private bool hoverFinishTime;
 
         public event EventHandler StartClicked;
         public event EventHandler FinishClicked;
@@ -1283,7 +1299,7 @@ namespace WorkTimeApp
             confirmationTimer = new Timer { Interval = 250 };
             confirmationTimer.Tick += (s, e) => ExpireConfirmation();
             punchToolTip = new ToolTip();
-            punchToolTip.SetToolTip(this, "点击时间编辑；更新需在10秒内再次点击确认。");
+            punchToolTip.SetToolTip(this, "点击整张卡片打卡；已有时间需在10秒内再次点击确认；右键或 F2 编辑时间。");
             inlineTimeEditor = new TextBox
             {
                 Visible = false, AutoSize = false, BorderStyle = BorderStyle.FixedSingle,
@@ -1454,24 +1470,28 @@ namespace WorkTimeApp
         private Rectangle GetStartBtnRect()
         {
             int cardW = (Width - Dpi.S(12)) / 2;
-            return new Rectangle(cardW - Dpi.S(58), Dpi.S(40), Dpi.S(44), Dpi.S(28));
+            return new Rectangle(0, 0, cardW, Height);
         }
 
         private Rectangle GetFinishBtnRect()
         {
             int cardW = (Width - Dpi.S(12)) / 2;
-            return new Rectangle(cardW * 2 + Dpi.S(12) - Dpi.S(58), Dpi.S(40), Dpi.S(44), Dpi.S(28));
+            return new Rectangle(cardW + Dpi.S(12), 0, cardW, Height);
         }
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
             bool inStart = GetStartBtnRect().Contains(e.Location);
             bool inFinish = GetFinishBtnRect().Contains(e.Location);
+            bool inStartTime = GetStartTimeRect().Contains(e.Location);
+            bool inFinishTime = GetFinishTimeRect().Contains(e.Location);
 
-            if (inStart != hoverStart || inFinish != hoverFinish)
+            if (inStart != hoverStart || inFinish != hoverFinish || inStartTime != hoverStartTime || inFinishTime != hoverFinishTime)
             {
                 hoverStart = inStart;
                 hoverFinish = inFinish;
+                hoverStartTime = inStartTime;
+                hoverFinishTime = inFinishTime;
                 Invalidate();
             }
             this.Cursor = (inStart || inFinish || GetStartTimeRect().Contains(e.Location) || GetFinishTimeRect().Contains(e.Location)) ? Cursors.Hand : Cursors.Default;
@@ -1480,10 +1500,12 @@ namespace WorkTimeApp
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            if (hoverStart || hoverFinish)
+            if (hoverStart || hoverFinish || hoverStartTime || hoverFinishTime)
             {
                 hoverStart = false;
                 hoverFinish = false;
+                hoverStartTime = false;
+                hoverFinishTime = false;
                 this.Cursor = Cursors.Default;
                 Invalidate();
             }
@@ -1492,17 +1514,24 @@ namespace WorkTimeApp
         protected override void OnMouseClick(MouseEventArgs e)
         {
             base.OnMouseClick(e);
+            if (e.Button == MouseButtons.Right)
+            {
+                if (GetStartBtnRect().Contains(e.Location)) { focusFinishButton = false; EditTime(true); }
+                else if (GetFinishBtnRect().Contains(e.Location)) { focusFinishButton = true; EditTime(false); }
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             if (GetStartBtnRect().Contains(e.Location))
             {
+                focusFinishButton = false;
                 RequestPunch(true);
             }
             else if (GetFinishBtnRect().Contains(e.Location))
             {
+                focusFinishButton = true;
                 RequestPunch(false);
             }
-            else if (GetStartTimeRect().Contains(e.Location)) EditTime(true);
-            else if (GetFinishTimeRect().Contains(e.Location)) EditTime(false);
+
         }
 
         private Rectangle GetStartTimeRect()
@@ -1518,8 +1547,13 @@ namespace WorkTimeApp
 
         private Rectangle GetTimeRect(Rectangle card, Rectangle button)
         {
-            return new Rectangle(card.X + Dpi.S(14), card.Y + Dpi.S(34),
-                Math.Max(1, button.Left - Dpi.S(8) - card.X - Dpi.S(14)), Dpi.S(36));
+            // Reserve only the measured label width, the right inset and a small gap.
+            using (var labelFont = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular))
+            {
+                int labelWidth = TextRenderer.MeasureText("更新", labelFont, Size.Empty, UiHelper.TextFlags).Width;
+                return new Rectangle(card.X + Dpi.S(4), card.Y + Dpi.S(2),
+                    Math.Max(1, card.Width - labelWidth - Dpi.S(12)), Math.Max(1, card.Height - Dpi.S(4)));
+            }
         }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -1546,20 +1580,39 @@ namespace WorkTimeApp
         private void DrawPunchCard(Graphics g, Rectangle card, Rectangle button,
             string label, string time, bool punched, bool hovered)
         {
-            using (var path = UiHelper.GetRoundedPath(card, Dpi.S(8)))
-            using (var brush = new SolidBrush(ColorTranslator.FromHtml("#F8FAFC")))
-                g.FillPath(brush, path);
+            bool confirming = pendingConfirmation == (label == "上班" ? 0 : 1);
+            if (confirming || hovered)
+            {
+                using (var path = UiHelper.GetRoundedPath(card, Dpi.S(8)))
+                using (var brush = new SolidBrush(ColorTranslator.FromHtml(confirming ? "#FEF2F2" : "#F1F5F9")))
+                    g.FillPath(brush, path);
+            }
             using (var font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular))
             {
-                int labelHeight = TextRenderer.MeasureText(label, font, Size.Empty, UiHelper.TextFlags).Height;
-                UiHelper.DrawText(g, label, font, ColorTranslator.FromHtml("#64748B"),
-                    new Rectangle(card.X + Dpi.S(14), card.Y + Dpi.S(10), card.Width - Dpi.S(28), labelHeight));
+                int textX = card.Right - Dpi.S(38);
+                int textY = card.Y + Math.Max(0, (card.Height - Dpi.S(44)) / 2);
+                TextRenderer.DrawText(g, label, font, new Rectangle(textX, textY + Dpi.S(24), Dpi.S(32), Dpi.S(20)), ColorTranslator.FromHtml("#64748B"), UiHelper.TextFlags | TextFormatFlags.Right);
+                string hint = confirming ? "确认" : hovered ? (punched ? "更新" : "打卡") : "";
+                TextRenderer.DrawText(g, hint, font, new Rectangle(textX, textY, Dpi.S(32), Dpi.S(20)), ColorTranslator.FromHtml(confirming ? "#DC2626" : hovered ? "#2563EB" : "#64748B"), UiHelper.TextFlags | TextFormatFlags.Right);
             }
             Rectangle timeRect = GetTimeRect(card, button);
-            using (var font = UiHelper.FitDrawingFont(this, time, 19f, FontStyle.Bold, timeRect.Size))
-                UiHelper.DrawText(g, time, font, ColorTranslator.FromHtml(punched ? "#0F172A" : "#94A3B8"), timeRect);
-            bool confirming = pendingConfirmation == (label == "上班" ? 0 : 1);
-            DrawButton(g, button, confirming ? "确认" : (punched ? "更新" : "打卡"), punched, hovered, confirming);
+            using (var family = new FontFamily("Microsoft YaHei UI"))
+            using (var digits = new GraphicsPath())
+            using (var format = (StringFormat)StringFormat.GenericTypographic.Clone())
+            using (var brush = new SolidBrush(ColorTranslator.FromHtml(confirming ? "#B91C1C" : punched ? "#334155" : "#94A3B8")))
+            {
+                digits.AddString(time, family, (int)FontStyle.Bold, 100f, PointF.Empty, format);
+                RectangleF ink = digits.GetBounds();
+                if (ink.Width > 0 && ink.Height > 0)
+                {
+                    float scale = Math.Min(timeRect.Width / ink.Width, timeRect.Height / ink.Height);
+                    using (var transform = new Matrix(scale, 0, 0, scale,
+                        timeRect.Left - ink.Left * scale,
+                        timeRect.Top + (timeRect.Height - ink.Height * scale) / 2 - ink.Top * scale))
+                        digits.Transform(transform);
+                    g.FillPath(brush, digits);
+                }
+            }
         }
         private void DrawButton(Graphics g, Rectangle rect, string text, bool isPunched, bool isHover, bool confirming)
         {
@@ -1581,11 +1634,10 @@ namespace WorkTimeApp
                 else
                 {
                     // Clean White Card Button with Border
-                    Color bg = isHover ? ColorTranslator.FromHtml("#DBEAFE") : ColorTranslator.FromHtml("#EFF6FF");
+                    Color bg = ColorTranslator.FromHtml(isHover ? "#EFF6FF" : "#F1F5F9");
                     using (var brush = new SolidBrush(bg)) g.FillPath(brush, path);
-                    using (var pen = new Pen(ColorTranslator.FromHtml("#BFDBFE"), 1f)) g.DrawPath(pen, path);
                     using (var font = UiHelper.DrawingFont(this, 9f, FontStyle.Regular))
-                    using (var brushText = new SolidBrush(ColorTranslator.FromHtml("#2563EB")))
+                    using (var brushText = new SolidBrush(ColorTranslator.FromHtml(isHover ? "#2563EB" : "#64748B")))
                     {
                         var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
                         g.DrawString(text, font, brushText, rect, sf);
@@ -1604,6 +1656,33 @@ namespace WorkTimeApp
     // Modern 2x2 KPI Grid Dashboard Control
     public class MonthKpiControl : Control
     {
+        private int hoveredCard = -1;
+        private int CardAt(Point point)
+        {
+            int gap = Dpi.S(12);
+            int width = (Width - gap) / 2;
+            int height = (Height - gap) / 2;
+            for (int index = 0; index < 4; index++)
+                if (new Rectangle((index % 2) * (width + gap), (index / 2) * (height + gap), width, height).Contains(point)) return index;
+            return -1;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int card = CardAt(e.Location);
+            if (hoveredCard == card) return;
+            hoveredCard = card;
+            Invalidate();
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            hoveredCard = -1;
+            Invalidate();
+        }
+
         private readonly DpiMetrics Dpi;
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public double ActualHours { get; set; } = 0.0;
@@ -1662,10 +1741,10 @@ namespace WorkTimeApp
                 string.Format("{0:F1}", ActualHours),
                 "h",
                 string.Format("已出勤 {0} 天", ActualDays),
-                ColorTranslator.FromHtml("#F8FAFC"),
-                ColorTranslator.FromHtml("#64748B"),
-                ColorTranslator.FromHtml("#0F172A"),
-                ColorTranslator.FromHtml("#94A3B8"));
+                ColorTranslator.FromHtml("#EFF6FF"),
+                ColorTranslator.FromHtml("#2563EB"),
+                ColorTranslator.FromHtml("#1D4ED8"),
+                ColorTranslator.FromHtml("#3B82F6"));
 
             // Card 2: 还需完成 (1, 0)
             DrawCard(g, new Rectangle(cardW + gap, 0, cardW, cardH), r,
@@ -1673,10 +1752,10 @@ namespace WorkTimeApp
                 string.Format("{0:F1}", RemainHours),
                 "h",
                 string.Format("剩余 {0} 工作日", RemainDays),
-                ColorTranslator.FromHtml("#F8FAFC"),
-                ColorTranslator.FromHtml("#64748B"),
-                ColorTranslator.FromHtml("#0F172A"),
-                ColorTranslator.FromHtml("#94A3B8"));
+                ColorTranslator.FromHtml("#FFF7ED"),
+                ColorTranslator.FromHtml("#C2410C"),
+                ColorTranslator.FromHtml("#9A3412"),
+                ColorTranslator.FromHtml("#C2410C"));
 
             // Card 3: 每日需达 (0, 1)
             DrawCard(g, new Rectangle(0, cardH + gap, cardW, cardH), r,
@@ -1684,10 +1763,10 @@ namespace WorkTimeApp
                 string.Format("{0:F1}", DailyReqHours),
                 "h/天",
                 string.Format("标准 {0:F1}h/天", StandardDailyHours),
-                ColorTranslator.FromHtml("#F8FAFC"),
-                ColorTranslator.FromHtml("#64748B"),
-                ColorTranslator.FromHtml("#0F172A"),
-                ColorTranslator.FromHtml("#94A3B8"));
+                ColorTranslator.FromHtml("#F5F3FF"),
+                ColorTranslator.FromHtml("#7C3AED"),
+                ColorTranslator.FromHtml("#6D28D9"),
+                ColorTranslator.FromHtml("#7C3AED"));
 
             // Card 4: 进度状态 (1, 1)
             string deltaVal;
@@ -1740,8 +1819,20 @@ namespace WorkTimeApp
             string title, string value, string unit, string subtitle,
             Color bg, Color titleColor, Color valueColor, Color subColor)
         {
+            bool hovered = hoveredCard >= 0 && CardAt(new Point(rect.X + rect.Width / 2, rect.Y + rect.Height / 2)) == hoveredCard;
+            if (hovered)
+                bg = Color.FromArgb((int)(bg.R * 0.88 + titleColor.R * 0.12),
+                    (int)(bg.G * 0.88 + titleColor.G * 0.12), (int)(bg.B * 0.88 + titleColor.B * 0.12));
             using (var path = UiHelper.GetRoundedPath(rect, radius))
             using (var brush = new SolidBrush(bg)) g.FillPath(brush, path);
+            if (hovered)
+            {
+                var outline = rect;
+                outline.Inflate(-1, -1);
+                using (var path = UiHelper.GetRoundedPath(outline, radius))
+                using (var pen = new Pen(Color.FromArgb(130, titleColor), Math.Max(1, Dpi.S(1))))
+                    g.DrawPath(pen, path);
+            }
             int pad = Dpi.S(10);
             int width = Math.Max(1, rect.Width - pad * 2);
             using (var titleFont = UiHelper.DrawingFont(this, 9f, FontStyle.Regular))
@@ -2154,14 +2245,11 @@ namespace WorkTimeApp
         private ComboBox cboKind;
         private TextBox txtNote;
 
-        private Button btnNowStart;
-        private Button btnNowFinish;
         private Button btnClear;
         private Button btnSave;
         private Button btnCancel;
         private Label lblStartError;
         private Label lblFinishError;
-        private ToolTip editToolTip;
 
         public EditRecordDialog(ExcelStorage storage, DateTime targetDate)
         {
@@ -2179,7 +2267,7 @@ namespace WorkTimeApp
             this.Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular);
             this.BackColor = Color.White;
             this.ForeColor = ColorTranslator.FromHtml("#1E293B");
-            this.ClientSize = Dpi.S(420, 334);
+            this.ClientSize = Dpi.S(380, 334);
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
@@ -2197,44 +2285,34 @@ namespace WorkTimeApp
                 Font = UiHelper.DrawingFont(this, 11f, FontStyle.Bold),
                 ForeColor = ColorTranslator.FromHtml("#0F172A"),
                 Location = Dpi.P(24, 16),
-                Size = Dpi.S(372, 48),
+                Size = Dpi.S(332, 48),
                 AutoSize = false
             };
             this.Controls.Add(lblHeaderDate);
 
-            editToolTip = new ToolTip();
-            bool isToday = TargetDate == DateTime.Today;
             int formY = 76;
 
             // Start Time
             var lblStart = new Label { Text = "上班:", Location = Dpi.P(24, formY + 4), Size = Dpi.S(50, 24) };
-            txtStart = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(180, 26), Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular), TextAlign = HorizontalAlignment.Center };
-            btnNowStart = UiHelper.CreateButton(this, "当前时间", Dpi.P(275, formY), Dpi.S(115, 28));
-            btnNowStart.Click += (s, e) => txtStart.Text = DateTime.Now.ToString("HH:mm");
-            btnNowStart.Enabled = isToday;
-            if (!isToday) editToolTip.SetToolTip(btnNowStart, "仅今天可填入当前时间；补录其他日期请手动输入。 ");
-            lblStartError = new Label { Location = Dpi.P(80, formY + 27), Size = Dpi.S(310, 17), ForeColor = ColorTranslator.FromHtml("#DC2626"), Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular), Visible = false, AccessibleRole = AccessibleRole.Alert };
+            txtStart = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(276, 26), Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular), TextAlign = HorizontalAlignment.Center };
+            lblStartError = new Label { Location = Dpi.P(80, formY + 27), Size = Dpi.S(276, 20), ForeColor = ColorTranslator.FromHtml("#DC2626"), Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular), Visible = false, AccessibleRole = AccessibleRole.Alert };
             txtStart.TextChanged += (s, e) => lblStartError.Visible = false;
-            this.Controls.AddRange(new Control[] { lblStart, txtStart, btnNowStart, lblStartError });
+            this.Controls.AddRange(new Control[] { lblStart, txtStart, lblStartError });
 
             formY += 52;
 
             // Finish Time
             var lblFinish = new Label { Text = "下班:", Location = Dpi.P(24, formY + 4), Size = Dpi.S(50, 24) };
-            txtFinish = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(180, 26), Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular), TextAlign = HorizontalAlignment.Center };
-            btnNowFinish = UiHelper.CreateButton(this, "当前时间", Dpi.P(275, formY), Dpi.S(115, 28));
-            btnNowFinish.Click += (s, e) => txtFinish.Text = DateTime.Now.ToString("HH:mm");
-            btnNowFinish.Enabled = isToday;
-            if (!isToday) editToolTip.SetToolTip(btnNowFinish, "仅今天可填入当前时间；补录其他日期请手动输入。 ");
-            lblFinishError = new Label { Location = Dpi.P(80, formY + 27), Size = Dpi.S(310, 17), ForeColor = ColorTranslator.FromHtml("#DC2626"), Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular), Visible = false, AccessibleRole = AccessibleRole.Alert };
+            txtFinish = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(276, 26), Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular), TextAlign = HorizontalAlignment.Center };
+            lblFinishError = new Label { Location = Dpi.P(80, formY + 27), Size = Dpi.S(276, 20), ForeColor = ColorTranslator.FromHtml("#DC2626"), Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular), Visible = false, AccessibleRole = AccessibleRole.Alert };
             txtFinish.TextChanged += (s, e) => lblFinishError.Visible = false;
-            this.Controls.AddRange(new Control[] { lblFinish, txtFinish, btnNowFinish, lblFinishError });
+            this.Controls.AddRange(new Control[] { lblFinish, txtFinish, lblFinishError });
 
             formY += 56;
 
             // Attendance Type
             var lblKind = new Label { Text = "类型:", Location = Dpi.P(24, formY + 4), Size = Dpi.S(50, 24) };
-            cboKind = new ComboBox { Location = Dpi.P(80, formY), Size = Dpi.S(180, 26), DropDownStyle = ComboBoxStyle.DropDownList, Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular) };
+            cboKind = new ComboBox { Location = Dpi.P(80, formY), Size = Dpi.S(276, 26), DropDownStyle = ComboBoxStyle.DropDownList, Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular) };
             cboKind.Items.AddRange(Array.ConvertAll(ExcelStorage.DAY_KINDS, item => (object)item));
             cboKind.SelectedIndex = 0;
             this.Controls.AddRange(new Control[] { lblKind, cboKind });
@@ -2243,13 +2321,13 @@ namespace WorkTimeApp
 
             // Note
             var lblNote = new Label { Text = "备注:", Location = Dpi.P(24, formY + 4), Size = Dpi.S(50, 24) };
-            txtNote = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(310, 26), Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular) };
+            txtNote = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(276, 26), Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular) };
             this.Controls.AddRange(new Control[] { lblNote, txtNote });
 
             formY += 52;
 
             // Bottom Buttons
-            btnClear = UiHelper.CreateButton(this, "删除当天记录", Dpi.P(24, formY), Dpi.S(145, 34));
+            btnClear = UiHelper.CreateButton(this, "删除当天记录", Dpi.P(24, formY), Dpi.S(120, 34));
             btnClear.ForeColor = ColorTranslator.FromHtml("#DC2626");
             btnClear.BackColor = ColorTranslator.FromHtml("#FEF2F2");
             btnClear.Click += (s, e) =>
@@ -2265,10 +2343,10 @@ namespace WorkTimeApp
                 }
             };
 
-            btnSave = UiHelper.CreateButton(this, "保存", Dpi.P(215, formY), Dpi.S(95, 34), true);
+            btnSave = UiHelper.CreateButton(this, "保存", Dpi.P(156, formY), Dpi.S(96, 34), true);
             btnSave.Click += (s, e) => SaveAndClose();
 
-            btnCancel = UiHelper.CreateButton(this, "取消", Dpi.P(320, formY), Dpi.S(80, 34));
+            btnCancel = UiHelper.CreateButton(this, "取消", Dpi.P(264, formY), Dpi.S(92, 34));
             btnCancel.DialogResult = DialogResult.Cancel;
 
             this.Controls.AddRange(new Control[] { btnClear, btnSave, btnCancel });
@@ -2296,14 +2374,22 @@ namespace WorkTimeApp
             txtNote.Text = ent.Note ?? "";
         }
 
+        private static TimeSpan? ParseInputTime(string raw)
+        {
+            string value = (raw ?? "").Trim().Replace('：', ':');
+            if (Regex.IsMatch(value, @"^[0-9]{4}$"))
+                value = value.Insert(2, ":");
+            if (!Regex.IsMatch(value, @"^[0-9]{1,2}:[0-9]{1,2}$")) return null;
+            return Entry.ParseTime(value);
+        }
         private void SaveAndClose()
         {
-            var st = Entry.ParseTime(txtStart.Text.Trim());
-            var fn = Entry.ParseTime(txtFinish.Text.Trim());
+            var st = ParseInputTime(txtStart.Text);
+            var fn = ParseInputTime(txtFinish.Text);
 
             if (!string.IsNullOrWhiteSpace(txtStart.Text) && !st.HasValue)
             {
-                lblStartError.Text = "格式应为 HH:mm，例如 09:00。";
+                lblStartError.Text = "请输入有效时间，如 09:00、9:00 或 0900。";
                 lblStartError.Visible = true;
                 txtStart.Focus();
                 txtStart.SelectAll();
@@ -2311,7 +2397,7 @@ namespace WorkTimeApp
             }
             if (!string.IsNullOrWhiteSpace(txtFinish.Text) && !fn.HasValue)
             {
-                lblFinishError.Text = "格式应为 HH:mm，例如 18:00。";
+                lblFinishError.Text = "请输入有效时间，如 18:00、18:0 或 1800。";
                 lblFinishError.Visible = true;
                 txtFinish.Focus();
                 txtFinish.SelectAll();
@@ -2620,6 +2706,12 @@ namespace WorkTimeApp
             btnNextMonth.Click += (s, e) => calControl.NextMonth();
 
             btnJumpToday = UiHelper.CreateButton(this, "今天", Dpi.P(leftX + 422, topRowY), Dpi.S(70, headerH));
+            foreach (var button in new[] { btnPrevMonth, btnNextMonth, btnJumpToday })
+            {
+                button.BackColor = Color.White;
+                button.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#F1F5F9");
+                button.FlatAppearance.MouseDownBackColor = ColorTranslator.FromHtml("#E2E8F0");
+            }
             btnJumpToday.Click += (s, e) => { calControl.SelectDate(DateTime.Today, false); UpdateCalendarHeader(); RefreshMonthOverview(); };
 
             this.Controls.AddRange(new Control[] { btnPrevMonth, lblCalendarTitle, btnNextMonth, btnJumpToday });
@@ -2702,10 +2794,10 @@ namespace WorkTimeApp
                 Text = "工作日 18 天",
                 Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Bold),
                 ForeColor = ColorTranslator.FromHtml("#1D4ED8"),
-                BackColor = ColorTranslator.FromHtml("#DBEAFE"),
+                BackColor = Color.Transparent,
                 Location = Dpi.P(rightX + rightWidth - 140, statHeaderY),
                 Size = Dpi.S(140, 24),
-                TextAlign = ContentAlignment.MiddleCenter,
+                TextAlign = ContentAlignment.MiddleRight,
                 AccessibleName = "本月工作日"
             };
             this.Controls.AddRange(new Control[] { lblMonthTitle, lblWorkdayTag });
@@ -2842,9 +2934,9 @@ namespace WorkTimeApp
 
                 lblMonthTitle.SetBounds(0, Dpi.S(122), Dpi.S(140), Dpi.S(24));
                 lblWorkdayTag.SetBounds(rightWidth - Dpi.S(140), Dpi.S(122), Dpi.S(140), Dpi.S(24));
-                prgMonth.SetBounds(0, Dpi.S(176), rightWidth, Dpi.S(8));
-                lblProgressTitle.SetBounds(0, Dpi.S(152), rightWidth - Dpi.S(100), Dpi.S(18));
-                lblPrgText.SetBounds(rightWidth - Dpi.S(90), Dpi.S(152), Dpi.S(90), Dpi.S(18));
+                prgMonth.SetBounds(0, Dpi.S(152), rightWidth, Dpi.S(8));
+                lblProgressTitle.SetBounds(0, Dpi.S(168), rightWidth - Dpi.S(100), Dpi.S(18));
+                lblPrgText.SetBounds(rightWidth - Dpi.S(90), Dpi.S(168), Dpi.S(90), Dpi.S(18));
                 kpiMonthControl.SetBounds(0, Dpi.S(194), rightWidth, overviewPanel.ClientSize.Height - Dpi.S(194));
             }
             finally
@@ -3002,6 +3094,10 @@ namespace WorkTimeApp
             double pct = targetH > 0 ? (actualH / targetH) * 100.0 : 0.0;
             prgMonth.Percentage = pct;
             lblPrgText.Text = string.Format("月目标 {0:F0}%", pct);
+            double excessHours = Math.Max(0.0, (sum.ActualMinutes - sum.TargetMinutes) / 60.0);
+            lblProgressTitle.Text = excessHours > 0 ? string.Format("超额 {0:F1}h", excessHours) : "月目标完成度";
+            lblProgressTitle.ForeColor = ColorTranslator.FromHtml(excessHours > 0 ? "#B45309" : "#64748B");
+            lblPrgText.ForeColor = ColorTranslator.FromHtml(pct >= 100.0 ? "#15803D" : "#64748B");
             prgMonth.Invalidate();
 
             kpiMonthControl.UpdateStats(
@@ -3099,17 +3195,17 @@ namespace WorkTimeApp
             trayMenu = new ContextMenuStrip();
             trayMenu.Font = UiHelper.DrawingFont(this, 9f, FontStyle.Regular);
 
-            var itemShow = new ToolStripMenuItem("显示下班了");
+            var itemShow = new ToolStripMenuItem("打开程序");
             itemShow.Font = UiHelper.DrawingFont(this, 9f, FontStyle.Bold);
             itemShow.Click += (s, e) => RestoreFromTray();
 
-            var itemPunchStart = new ToolStripMenuItem("⚡ 快捷上班打卡");
+            var itemPunchStart = new ToolStripMenuItem("上班打卡");
             itemPunchStart.Click += (s, e) => QuickPunch(true);
 
-            var itemPunchFinish = new ToolStripMenuItem("⚡ 快捷下班打卡");
+            var itemPunchFinish = new ToolStripMenuItem("下班打卡");
             itemPunchFinish.Click += (s, e) => QuickPunch(false);
 
-            var itemExit = new ToolStripMenuItem("退出程序");
+            var itemExit = new ToolStripMenuItem("退出");
             itemExit.Click += (s, e) =>
             {
                 isExplicitExit = true;
@@ -3149,7 +3245,7 @@ namespace WorkTimeApp
             };
         }
 
-        private void RestoreFromTray()
+        internal void RestoreFromTray()
         {
             RefreshDayIfChanged();
             if (!this.Visible)
@@ -3220,10 +3316,45 @@ namespace WorkTimeApp
         [STAThread]
         static void Main()
         {
-            Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            var storage = new ExcelStorage();
-            Application.Run(new MainForm(storage));
+            string userId = System.Security.Principal.WindowsIdentity.GetCurrent().User.Value;
+            string instanceName = @"Local\OffWork." + userId;
+            using (var activate = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset, instanceName + ".Activate"))
+            using (var instance = new System.Threading.Mutex(true, instanceName, out bool firstInstance))
+            {
+                if (!firstInstance)
+                {
+                    activate.Set();
+                    return;
+                }
+                System.Threading.RegisteredWaitHandle activationWait = null;
+                try
+                {
+                    Application.EnableVisualStyles();
+                    using (var window = new MainForm(new ExcelStorage()))
+                    {
+                        // Create the UI handle before receiving signals; an early signal stays pending.
+                        var windowHandle = window.Handle;
+                        activationWait = System.Threading.ThreadPool.RegisterWaitForSingleObject(activate, (state, timedOut) =>
+                        {
+                            try
+                            {
+                                window.BeginInvoke(new Action(() =>
+                                {
+                                    if (!window.IsDisposed) window.RestoreFromTray();
+                                }));
+                            }
+                            catch (InvalidOperationException) { }
+                        }, null, System.Threading.Timeout.Infinite, false);
+                        Application.Run(window);
+                    }
+                }
+                finally
+                {
+                    if (activationWait != null) activationWait.Unregister(null);
+                    instance.ReleaseMutex();
+                }
+            }
         }
     }
 }
