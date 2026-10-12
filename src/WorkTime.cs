@@ -1257,7 +1257,7 @@ namespace WorkTimeApp
     }
 
         // Modern Today Punch Double Card Control with Vector Self-Painted Buttons
-    public class TodayPunchControl : Control
+    public class TodayPunchControl : Control, IMessageFilter
     {
         private readonly DpiMetrics Dpi;
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -1302,7 +1302,8 @@ namespace WorkTimeApp
             punchToolTip.SetToolTip(this, "点击整张卡片打卡；已有时间需在10秒内再次点击确认；右键或 F2 编辑时间。");
             inlineTimeEditor = new TextBox
             {
-                Visible = false, AutoSize = false, BorderStyle = BorderStyle.FixedSingle,
+                Visible = false, AutoSize = false, BorderStyle = BorderStyle.None,
+                ForeColor = ColorTranslator.FromHtml("#334155"),
                 MaxLength = 5, TextAlign = HorizontalAlignment.Left
             };
             Controls.Add(inlineTimeEditor);
@@ -1311,7 +1312,10 @@ namespace WorkTimeApp
                 if (e.KeyCode == Keys.Enter) { SaveInlineTime(); e.SuppressKeyPress = true; }
                 else if (e.KeyCode == Keys.Escape) { CancelInlineTime(); e.SuppressKeyPress = true; }
             };
-            inlineTimeEditor.LostFocus += (s, e) => CancelInlineTime();
+            inlineTimeEditor.LostFocus += (s, e) =>
+            {
+                if (inlineTimeEditor.Visible && !closingInlineEditor) SaveInlineTime();
+            };
             inlineTimeEditor.TextChanged += (s, e) => inlineTimeEditor.BackColor = Color.White;
         }
 
@@ -1385,43 +1389,71 @@ namespace WorkTimeApp
             CancelConfirmation();
             editingStart = start;
             inlineTimeEditor.Bounds = start ? GetStartTimeRect() : GetFinishTimeRect();
-            inlineTimeEditor.Font = UiHelper.DrawingFont(this, 16f, FontStyle.Bold);
+            LayoutInlineEditor();
             inlineTimeEditor.Text = (start ? HasStart : HasFinish) ? (start ? StartTime : FinishTime) : "";
             inlineTimeEditor.BackColor = Color.White;
-            punchToolTip.SetToolTip(inlineTimeEditor, "输入 HH:mm，回车保存，Esc取消；留空可清除该时间。");
+            punchToolTip.SetToolTip(inlineTimeEditor, "输入 09:00 或 0900，回车保存，Esc取消；留空可清除该时间。");
             inlineTimeEditor.Visible = true;
+            Application.RemoveMessageFilter(this);
+            Application.AddMessageFilter(this);
             inlineTimeEditor.BringToFront();
             inlineTimeEditor.Focus();
             inlineTimeEditor.SelectAll();
         }
 
+        private bool closingInlineEditor;
+
         private void CancelInlineTime()
         {
-            inlineTimeEditor.Visible = false;
+            Application.RemoveMessageFilter(this);
+            closingInlineEditor = true;
+            try { inlineTimeEditor.Visible = false; }
+            finally { closingInlineEditor = false; }
             Invalidate();
+        }
+
+        public bool PreFilterMessage(ref Message message)
+        {
+            if (!inlineTimeEditor.Visible) return false;
+            bool mouseDown = message.Msg == 0x0201 || message.Msg == 0x0204 || message.Msg == 0x0207
+                || message.Msg == 0x00A1 || message.Msg == 0x00A4;
+            if (!mouseDown) return false;
+            Control target = Control.FromHandle(message.HWnd);
+            if (target == inlineTimeEditor || (target != null && inlineTimeEditor.Contains(target))) return false;
+            SaveInlineTime();
+            return inlineTimeEditor.Visible;
+        }
+
+        private Font CreateTimeFont(Size area)
+        {
+            return UiHelper.FitDrawingFont(this, "88:88", area.Height * 72f / Dpi.S(96), FontStyle.Bold, area);
+        }
+
+        private void LayoutInlineEditor()
+        {
+            Rectangle area = editingStart ? GetStartTimeRect() : GetFinishTimeRect();
+            Font previous = inlineTimeEditor.Font;
+            inlineTimeEditor.Font = CreateTimeFont(area.Size);
+            inlineTimeEditor.Bounds = new Rectangle(area.X, area.Y + Math.Max(0, (area.Height - inlineTimeEditor.PreferredHeight) / 2), area.Width, inlineTimeEditor.PreferredHeight);
+            if (previous != null && previous != Font) previous.Dispose();
         }
 
         internal void RepositionEditor()
         {
             if (!inlineTimeEditor.Visible) return;
             inlineTimeEditor.Bounds = editingStart ? GetStartTimeRect() : GetFinishTimeRect();
-            inlineTimeEditor.Font = UiHelper.DrawingFont(this, 16f, FontStyle.Bold);
+            LayoutInlineEditor();
         }
 
         private void SaveInlineTime()
         {
-            string text = inlineTimeEditor.Text.Trim().Replace('：', ':');
-            TimeSpan parsed;
-            TimeSpan? time = null;
-            if (text.Length > 0)
+            string text = inlineTimeEditor.Text.Trim();
+            TimeSpan? time = EditRecordDialog.ParseInputTime(text);
+            if (text.Length > 0 && !time.HasValue)
             {
-                if (!TimeSpan.TryParseExact(text, new[] { @"hh\:mm", @"h\:mm" }, CultureInfo.InvariantCulture, out parsed) || parsed.TotalHours >= 24)
-                {
-                    inlineTimeEditor.BackColor = ColorTranslator.FromHtml("#FEE2E2");
-                    punchToolTip.Show("请输入有效时间，例如 09:00。", inlineTimeEditor, 0, inlineTimeEditor.Height, 2500);
-                    return;
-                }
-                time = parsed;
+                inlineTimeEditor.BackColor = ColorTranslator.FromHtml("#FEE2E2");
+                punchToolTip.Show("请输入有效时间，例如 09:00 或 0900。", inlineTimeEditor, 0, inlineTimeEditor.Height, 2500);
+                return;
             }
             bool start = editingStart;
             CancelInlineTime();
@@ -1592,26 +1624,15 @@ namespace WorkTimeApp
                 int textX = card.Right - Dpi.S(38);
                 int textY = card.Y + Math.Max(0, (card.Height - Dpi.S(44)) / 2);
                 TextRenderer.DrawText(g, label, font, new Rectangle(textX, textY + Dpi.S(24), Dpi.S(32), Dpi.S(20)), ColorTranslator.FromHtml("#64748B"), UiHelper.TextFlags | TextFormatFlags.Right);
-                string hint = confirming ? "确认" : hovered ? (punched ? "更新" : "打卡") : "";
+                bool editing = inlineTimeEditor.Visible && editingStart == (label == "上班");
+                string hint = editing ? "" : confirming ? "确认" : hovered ? (punched ? "更新" : "打卡") : "";
                 TextRenderer.DrawText(g, hint, font, new Rectangle(textX, textY, Dpi.S(32), Dpi.S(20)), ColorTranslator.FromHtml(confirming ? "#DC2626" : hovered ? "#2563EB" : "#64748B"), UiHelper.TextFlags | TextFormatFlags.Right);
             }
             Rectangle timeRect = GetTimeRect(card, button);
-            using (var family = new FontFamily("Microsoft YaHei UI"))
-            using (var digits = new GraphicsPath())
-            using (var format = (StringFormat)StringFormat.GenericTypographic.Clone())
-            using (var brush = new SolidBrush(ColorTranslator.FromHtml(confirming ? "#B91C1C" : punched ? "#334155" : "#94A3B8")))
+            if (!(inlineTimeEditor.Visible && editingStart == (label == "上班")))
             {
-                digits.AddString(time, family, (int)FontStyle.Bold, 100f, PointF.Empty, format);
-                RectangleF ink = digits.GetBounds();
-                if (ink.Width > 0 && ink.Height > 0)
-                {
-                    float scale = Math.Min(timeRect.Width / ink.Width, timeRect.Height / ink.Height);
-                    using (var transform = new Matrix(scale, 0, 0, scale,
-                        timeRect.Left - ink.Left * scale,
-                        timeRect.Top + (timeRect.Height - ink.Height * scale) / 2 - ink.Top * scale))
-                        digits.Transform(transform);
-                    g.FillPath(brush, digits);
-                }
+                using (var font = CreateTimeFont(timeRect.Size))
+                    TextRenderer.DrawText(g, time, font, timeRect, ColorTranslator.FromHtml(confirming ? "#B91C1C" : punched ? "#334155" : "#94A3B8"), UiHelper.TextFlags | TextFormatFlags.VerticalCenter);
             }
         }
         private void DrawButton(Graphics g, Rectangle rect, string text, bool isPunched, bool isHover, bool confirming)
@@ -1648,7 +1669,7 @@ namespace WorkTimeApp
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { confirmationTimer.Dispose(); punchToolTip.Dispose(); }
+            if (disposing) { Application.RemoveMessageFilter(this); confirmationTimer.Dispose(); punchToolTip.Dispose(); }
             base.Dispose(disposing);
         }
     }
@@ -2267,7 +2288,7 @@ namespace WorkTimeApp
             this.Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular);
             this.BackColor = Color.White;
             this.ForeColor = ColorTranslator.FromHtml("#1E293B");
-            this.ClientSize = Dpi.S(380, 334);
+            this.ClientSize = Dpi.S(320, 334);
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
@@ -2284,8 +2305,8 @@ namespace WorkTimeApp
                 Text = string.Format("{0:yyyy年MM月dd日} {1}  ({2})", TargetDate, ExcelStorage.GetChineseWeekdayShort(TargetDate), dayDesc),
                 Font = UiHelper.DrawingFont(this, 11f, FontStyle.Bold),
                 ForeColor = ColorTranslator.FromHtml("#0F172A"),
-                Location = Dpi.P(24, 16),
-                Size = Dpi.S(332, 48),
+                Location = Dpi.P(16, 16),
+                Size = Dpi.S(288, 48),
                 AutoSize = false
             };
             this.Controls.Add(lblHeaderDate);
@@ -2293,26 +2314,26 @@ namespace WorkTimeApp
             int formY = 76;
 
             // Start Time
-            var lblStart = new Label { Text = "上班:", Location = Dpi.P(24, formY + 4), Size = Dpi.S(50, 24) };
-            txtStart = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(276, 26), Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular), TextAlign = HorizontalAlignment.Center };
-            lblStartError = new Label { Location = Dpi.P(80, formY + 27), Size = Dpi.S(276, 20), ForeColor = ColorTranslator.FromHtml("#DC2626"), Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular), Visible = false, AccessibleRole = AccessibleRole.Alert };
+            var lblStart = new Label { Text = "上班:", Location = Dpi.P(16, formY + 4), Size = Dpi.S(50, 24) };
+            txtStart = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(224, 26), Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular), TextAlign = HorizontalAlignment.Center };
+            lblStartError = new Label { Location = Dpi.P(80, formY + 27), Size = Dpi.S(224, 20), ForeColor = ColorTranslator.FromHtml("#DC2626"), Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular), Visible = false, AccessibleRole = AccessibleRole.Alert };
             txtStart.TextChanged += (s, e) => lblStartError.Visible = false;
             this.Controls.AddRange(new Control[] { lblStart, txtStart, lblStartError });
 
             formY += 52;
 
             // Finish Time
-            var lblFinish = new Label { Text = "下班:", Location = Dpi.P(24, formY + 4), Size = Dpi.S(50, 24) };
-            txtFinish = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(276, 26), Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular), TextAlign = HorizontalAlignment.Center };
-            lblFinishError = new Label { Location = Dpi.P(80, formY + 27), Size = Dpi.S(276, 20), ForeColor = ColorTranslator.FromHtml("#DC2626"), Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular), Visible = false, AccessibleRole = AccessibleRole.Alert };
+            var lblFinish = new Label { Text = "下班:", Location = Dpi.P(16, formY + 4), Size = Dpi.S(50, 24) };
+            txtFinish = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(224, 26), Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular), TextAlign = HorizontalAlignment.Center };
+            lblFinishError = new Label { Location = Dpi.P(80, formY + 27), Size = Dpi.S(224, 20), ForeColor = ColorTranslator.FromHtml("#DC2626"), Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular), Visible = false, AccessibleRole = AccessibleRole.Alert };
             txtFinish.TextChanged += (s, e) => lblFinishError.Visible = false;
             this.Controls.AddRange(new Control[] { lblFinish, txtFinish, lblFinishError });
 
             formY += 56;
 
             // Attendance Type
-            var lblKind = new Label { Text = "类型:", Location = Dpi.P(24, formY + 4), Size = Dpi.S(50, 24) };
-            cboKind = new ComboBox { Location = Dpi.P(80, formY), Size = Dpi.S(276, 26), DropDownStyle = ComboBoxStyle.DropDownList, Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular) };
+            var lblKind = new Label { Text = "类型:", Location = Dpi.P(16, formY + 4), Size = Dpi.S(50, 24) };
+            cboKind = new ComboBox { Location = Dpi.P(80, formY), Size = Dpi.S(224, 26), DropDownStyle = ComboBoxStyle.DropDownList, Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular) };
             cboKind.Items.AddRange(Array.ConvertAll(ExcelStorage.DAY_KINDS, item => (object)item));
             cboKind.SelectedIndex = 0;
             this.Controls.AddRange(new Control[] { lblKind, cboKind });
@@ -2320,14 +2341,14 @@ namespace WorkTimeApp
             formY += 44;
 
             // Note
-            var lblNote = new Label { Text = "备注:", Location = Dpi.P(24, formY + 4), Size = Dpi.S(50, 24) };
-            txtNote = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(276, 26), Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular) };
+            var lblNote = new Label { Text = "备注:", Location = Dpi.P(16, formY + 4), Size = Dpi.S(50, 24) };
+            txtNote = new TextBox { Location = Dpi.P(80, formY), Size = Dpi.S(224, 26), Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular) };
             this.Controls.AddRange(new Control[] { lblNote, txtNote });
 
             formY += 52;
 
             // Bottom Buttons
-            btnClear = UiHelper.CreateButton(this, "删除当天记录", Dpi.P(24, formY), Dpi.S(120, 34));
+            btnClear = UiHelper.CreateButton(this, "删除当天记录", Dpi.P(16, formY), Dpi.S(112, 34));
             btnClear.ForeColor = ColorTranslator.FromHtml("#DC2626");
             btnClear.BackColor = ColorTranslator.FromHtml("#FEF2F2");
             btnClear.Click += (s, e) =>
@@ -2343,10 +2364,10 @@ namespace WorkTimeApp
                 }
             };
 
-            btnSave = UiHelper.CreateButton(this, "保存", Dpi.P(156, formY), Dpi.S(96, 34), true);
+            btnSave = UiHelper.CreateButton(this, "保存", Dpi.P(136, formY), Dpi.S(76, 34), true);
             btnSave.Click += (s, e) => SaveAndClose();
 
-            btnCancel = UiHelper.CreateButton(this, "取消", Dpi.P(264, formY), Dpi.S(92, 34));
+            btnCancel = UiHelper.CreateButton(this, "取消", Dpi.P(224, formY), Dpi.S(80, 34));
             btnCancel.DialogResult = DialogResult.Cancel;
 
             this.Controls.AddRange(new Control[] { btnClear, btnSave, btnCancel });
@@ -2374,7 +2395,7 @@ namespace WorkTimeApp
             txtNote.Text = ent.Note ?? "";
         }
 
-        private static TimeSpan? ParseInputTime(string raw)
+        internal static TimeSpan? ParseInputTime(string raw)
         {
             string value = (raw ?? "").Trim().Replace('：', ':');
             if (Regex.IsMatch(value, @"^[0-9]{4}$"))
@@ -2389,7 +2410,7 @@ namespace WorkTimeApp
 
             if (!string.IsNullOrWhiteSpace(txtStart.Text) && !st.HasValue)
             {
-                lblStartError.Text = "请输入有效时间，如 09:00、9:00 或 0900。";
+                lblStartError.Text = "有效格式：09:00、9:00、0900。";
                 lblStartError.Visible = true;
                 txtStart.Focus();
                 txtStart.SelectAll();
@@ -2397,7 +2418,7 @@ namespace WorkTimeApp
             }
             if (!string.IsNullOrWhiteSpace(txtFinish.Text) && !fn.HasValue)
             {
-                lblFinishError.Text = "请输入有效时间，如 18:00、18:0 或 1800。";
+                lblFinishError.Text = "有效格式：18:00、18:0、1800。";
                 lblFinishError.Visible = true;
                 txtFinish.Focus();
                 txtFinish.SelectAll();
