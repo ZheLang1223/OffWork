@@ -1433,6 +1433,13 @@ namespace WorkTimeApp
             if (e.Button == MouseButtons.Left) Focus();
         }
 
+        internal void ResetDayInteraction()
+        {
+            CancelConfirmation();
+            CancelInlineTime();
+            activationKeyHeld = false;
+        }
+
         public void UpdatePunch(string startTime, bool hasStart, string finishTime, bool hasFinish)
         {
             if (StartTime != startTime || FinishTime != finishTime || HasStart != hasStart || HasFinish != hasFinish)
@@ -2546,6 +2553,8 @@ namespace WorkTimeApp
         private MonthKpiControl kpiMonthControl;
 
         private Timer timerTicker;
+        private Timer dayChangeTimer;
+        private DateTime displayedDay = DateTime.Today;
         private NotifyIcon notifyIcon;
         private ContextMenuStrip trayMenu;
         private bool isExplicitExit = false;
@@ -2566,6 +2575,9 @@ namespace WorkTimeApp
             timerTicker = new Timer { Interval = 1000 };
             timerTicker.Tick += (s, e) => OnSecondTick();
             timerTicker.Start();
+            dayChangeTimer = new Timer { Interval = 10 * 60 * 1000 };
+            dayChangeTimer.Tick += (s, e) => RefreshDayIfChanged();
+            dayChangeTimer.Start();
         }
 
         private void InitializeComponent()
@@ -2888,6 +2900,7 @@ namespace WorkTimeApp
 
         private void QuickPunch(bool isStart, bool inlineConfirmed = false)
         {
+            if (RefreshDayIfChanged()) return;
             var nowTime = new TimeSpan(DateTime.Now.Hour, DateTime.Now.Minute, 0);
             store.Records.TryGetValue(DateTime.Today, out var entry);
             TimeSpan? existingTime = isStart ? (entry != null ? entry.Start : null) : (entry != null ? entry.Finish : null);
@@ -2935,6 +2948,7 @@ namespace WorkTimeApp
 
         private void SaveInlinePunch(bool start, TimeSpan? time)
         {
+            if (RefreshDayIfChanged()) return;
             store.Records.TryGetValue(DateTime.Today, out var entry);
             if (entry == null) entry = new Entry();
             try
@@ -3000,6 +3014,27 @@ namespace WorkTimeApp
                 standardDailyHours: store.DailyTarget,
                 deltaMinutes: sum.DeltaMinutes
             );
+        }
+
+        private bool RefreshDayIfChanged()
+        {
+            DateTime today = DateTime.Today;
+            if (today == displayedDay) return false;
+            bool followToday = calControl.SelectedDate == displayedDay;
+            displayedDay = today;
+            todayPunchControl.ResetDayInteraction();
+            if (followToday) calControl.SelectDate(today, false);
+            UpdateCalendarHeader();
+            RefreshTodayPunch();
+            RefreshMonthOverview();
+            calControl.Invalidate();
+            return true;
+        }
+
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            if (todayPunchControl != null && calControl != null) RefreshDayIfChanged();
         }
 
         private void OnSecondTick()
@@ -3116,6 +3151,7 @@ namespace WorkTimeApp
 
         private void RestoreFromTray()
         {
+            RefreshDayIfChanged();
             if (!this.Visible)
             {
                 this.Show();
@@ -3170,6 +3206,7 @@ namespace WorkTimeApp
             if (disposing)
             {
                 if (timerTicker != null) timerTicker.Dispose();
+                if (dayChangeTimer != null) dayChangeTimer.Dispose();
                 if (notifyIcon != null) notifyIcon.Dispose();
                 if (trayMenu != null) trayMenu.Dispose();
                 if (toolTipTop != null) toolTipTop.Dispose();
