@@ -35,7 +35,7 @@ namespace WorkTimeApp
     {
         public TimeSpan? Start { get; set; }
         public TimeSpan? Finish { get; set; }
-        public int BreakMin { get; set; } = 0; // 无午休，恒为0
+        public int BreakMin { get; set; } = 0;
         public string Kind { get; set; }
         public string Note { get; set; }
 
@@ -43,7 +43,7 @@ namespace WorkTimeApp
         {
             Start = start;
             Finish = finish;
-            BreakMin = 0;
+            BreakMin = Math.Max(0, breakMin);
             Kind = string.IsNullOrEmpty(kind) ? "自动" : kind;
             Note = note ?? "";
         }
@@ -57,7 +57,7 @@ namespace WorkTimeApp
                 DateTime f = new DateTime(2000, 1, 1).Add(Finish.Value);
                 if (f < s) f = f.AddDays(1);
                 int total = (int)Math.Floor((f - s).TotalMinutes);
-                return Math.Max(0, total);
+                return Math.Max(0, total - BreakMin);
             }
         }
 
@@ -69,7 +69,7 @@ namespace WorkTimeApp
             var dict = new Dictionary<string, object>();
             dict["start"] = StartClock;
             dict["finish"] = FinishClock;
-            dict["break_min"] = 0;
+            dict["break_min"] = BreakMin;
             dict["kind"] = Kind;
             dict["note"] = Note;
             return dict;
@@ -82,7 +82,7 @@ namespace WorkTimeApp
             if (dict.ContainsKey("start")) entry.Start = ParseTime(dict["start"] != null ? dict["start"].ToString() : null);
             string fKey = dict.ContainsKey("finish") ? "finish" : (dict.ContainsKey("end") ? "end" : null);
             if (fKey != null) entry.Finish = ParseTime(dict[fKey] != null ? dict[fKey].ToString() : null);
-            entry.BreakMin = 0;
+            entry.BreakMin = dict.ContainsKey("break_min") ? Math.Max(0, Convert.ToInt32(dict["break_min"])) : 0;
             if (dict.ContainsKey("kind") && dict["kind"] != null) entry.Kind = dict["kind"].ToString();
             if (dict.ContainsKey("note") && dict["note"] != null) entry.Note = dict["note"].ToString();
             return entry;
@@ -295,6 +295,28 @@ namespace WorkTimeApp
         public double DailyTarget { get; set; } = 8.0;
         public string StandardStart { get; set; } = "09:00";
         public string StandardFinish { get; set; } = "18:00";
+        public bool LunchEnabled { get; set; }
+        public string LunchStart { get; set; } = "12:00";
+        public string LunchFinish { get; set; } = "13:00";
+        public DateTime LunchEffective { get; set; } = DateTime.MaxValue;
+
+        internal static int LunchOverlap(TimeSpan? start, TimeSpan? finish, TimeSpan lunchStart, TimeSpan lunchFinish)
+        {
+            if (!start.HasValue || !finish.HasValue) return 0;
+            double end = finish.Value.TotalMinutes;
+            if (finish < start) end += 1440;
+            double begin = start.Value.TotalMinutes;
+            double overlap = 0;
+            for (int day = 0; day <= 1; day++)
+                overlap += Math.Max(0, Math.Min(end, day * 1440 + lunchFinish.TotalMinutes) - Math.Max(begin, day * 1440 + lunchStart.TotalMinutes));
+            return (int)overlap;
+        }
+        private int CalculateLunch(DateTime day, TimeSpan? start, TimeSpan? finish)
+        {
+            if (!LunchEnabled || day.Date < LunchEffective.Date) return 0;
+            var a = Entry.ParseTime(LunchStart); var b = Entry.ParseTime(LunchFinish);
+            return a.HasValue && b.HasValue ? LunchOverlap(start, finish, a.Value, b.Value) : 0;
+        }
 
         public Dictionary<string, object> PendingEntries { get; private set; } = new Dictionary<string, object>();
         public Dictionary<string, object> PendingConfig { get; private set; } = new Dictionary<string, object>();
@@ -450,7 +472,7 @@ namespace WorkTimeApp
                                 var entry = new Entry();
                                 if (cells.ContainsKey("C")) entry.Start = Entry.ParseTime(cells["C"]);
                                 if (cells.ContainsKey("D")) entry.Finish = Entry.ParseTime(cells["D"]);
-                                entry.BreakMin = 0;
+                                entry.BreakMin = cells.ContainsKey("E") && int.TryParse(cells["E"], out int pause) ? Math.Max(0, pause) : 0;
                                 if (cells.ContainsKey("H")) entry.Kind = cells["H"];
                                 if (cells.ContainsKey("I")) entry.Note = cells["I"];
                                 parsed[d.Value.Date] = entry;
@@ -469,7 +491,11 @@ namespace WorkTimeApp
                             foreach (var c in xdoc.Descendants(ns + "c"))
                             {
                                 string r = (string)c.Attribute("r");
-                                if (r == "B1")
+                                if (r == "E1") LunchEnabled = GetCellValue(c, sharedStrings, ns) == "1";
+                                else if (r == "F1") LunchStart = GetCellValue(c, sharedStrings, ns);
+                                else if (r == "G1") LunchFinish = GetCellValue(c, sharedStrings, ns);
+                                else if (r == "H1") { if (DateTime.TryParseExact(GetCellValue(c, sharedStrings, ns), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var effective)) LunchEffective = effective; }
+                                else if (r == "B1")
                                 {
                                     string val = GetCellValue(c, sharedStrings, ns);
                                     if (double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out double dt)) DailyTarget = dt;
@@ -548,7 +574,7 @@ namespace WorkTimeApp
 
         public void SaveDay(DateTime day, TimeSpan? start, TimeSpan? finish, string kind, string note)
         {
-            var entry = new Entry(start, finish, 0, kind, note);
+            var entry = new Entry(start, finish, day.Date < DateTime.Today && Records.ContainsKey(day.Date) ? Records[day.Date].BreakMin : CalculateLunch(day, start, finish), kind, note);
             Records[day.Date] = entry;
             PendingEntries[day.ToString("yyyy-MM-dd")] = entry.ToDict();
             WriteJournal();
@@ -563,8 +589,15 @@ namespace WorkTimeApp
             Sync(day);
         }
 
-        public void SaveConfig(double target, string stdStart = "09:00", string stdFinish = "18:00")
+        public void SaveConfig(double target, string stdStart = "09:00", string stdFinish = "18:00", bool lunchEnabled = false, string lunchStart = "12:00", string lunchFinish = "13:00")
         {
+            LunchEnabled = lunchEnabled; LunchStart = lunchStart; LunchFinish = lunchFinish; LunchEffective = DateTime.Today;
+            PendingConfig["lunch_enabled"] = lunchEnabled; PendingConfig["lunch_start"] = lunchStart; PendingConfig["lunch_finish"] = lunchFinish; PendingConfig["lunch_effective"] = LunchEffective.ToString("yyyy-MM-dd");
+            foreach (var pair in Records.Where(p => p.Key >= DateTime.Today).ToList())
+            {
+                pair.Value.BreakMin = CalculateLunch(pair.Key, pair.Value.Start, pair.Value.Finish);
+                PendingEntries[pair.Key.ToString("yyyy-MM-dd")] = pair.Value.ToDict();
+            }
             DailyTarget = target;
             StandardStart = stdStart;
             StandardFinish = stdFinish;
@@ -624,6 +657,10 @@ namespace WorkTimeApp
                     }
                 }
             }
+            if (PendingConfig.ContainsKey("lunch_enabled")) LunchEnabled = Convert.ToBoolean(PendingConfig["lunch_enabled"]);
+            if (PendingConfig.ContainsKey("lunch_start")) LunchStart = PendingConfig["lunch_start"].ToString();
+            if (PendingConfig.ContainsKey("lunch_finish")) LunchFinish = PendingConfig["lunch_finish"].ToString();
+            if (PendingConfig.ContainsKey("lunch_effective")) LunchEffective = DateTime.ParseExact(PendingConfig["lunch_effective"].ToString(), "yyyy-MM-dd", CultureInfo.InvariantCulture);
             if (PendingConfig.ContainsKey("daily_target_hours"))
             {
                 if (double.TryParse(PendingConfig["daily_target_hours"].ToString(), out double dt)) DailyTarget = dt;
@@ -716,9 +753,9 @@ namespace WorkTimeApp
                             }
                             else row.Add(CreateCell(ns, "D" + rIdx, "3", ""));
                             // E: Break (0)
-                            row.Add(CreateCell(ns, "E" + rIdx, "4", "0"));
+                            row.Add(CreateCell(ns, "E" + rIdx, "4", entry.BreakMin.ToString(CultureInfo.InvariantCulture)));
                             // F: Worked hours formula
-                            row.Add(CreateFormulaCell(ns, "F" + rIdx, "5", string.Format("IF(OR(C{0}=\"\",D{0}=\"\"),\"\",MAX(0,ROUND(((D{0}+(D{0}<C{0})-C{0})*24),2)))", rIdx),
+                            row.Add(CreateFormulaCell(ns, "F" + rIdx, "5", string.Format("IF(OR(C{0}=\"\",D{0}=\"\"),\"\",MAX(0,ROUND(((D{0}+(D{0}<C{0})-C{0})*24-E{0}/60),2)))", rIdx),
                                 entry.WorkedMinutes.HasValue ? (entry.WorkedMinutes.Value / 60.0).ToString("F2", CultureInfo.InvariantCulture) : ""));
                             // G: Worked minutes formula
                             row.Add(CreateFormulaCell(ns, "G" + rIdx, "4", string.Format("IF(F{0}=\"\",\"\",ROUND(F{0}*60,0))", rIdx),
@@ -759,10 +796,14 @@ namespace WorkTimeApp
                         row1.Elements(ns + "c").Where(c =>
                             (string)c.Attribute("r") == "B1" ||
                             (string)c.Attribute("r") == "C1" ||
-                            (string)c.Attribute("r") == "D1").Remove();
+                            (string)c.Attribute("r") == "D1" || new[] { "E1", "F1", "G1", "H1" }.Contains((string)c.Attribute("r"))).Remove();
                         row1.Add(CreateCell(ns, "B1", "0", DailyTarget.ToString(CultureInfo.InvariantCulture)));
                         row1.Add(CreateInlineStrCell(ns, "C1", "0", StandardStart));
                         row1.Add(CreateInlineStrCell(ns, "D1", "0", StandardFinish));
+                        row1.Add(CreateInlineStrCell(ns, "E1", "0", LunchEnabled ? "1" : "0"));
+                        row1.Add(CreateInlineStrCell(ns, "F1", "0", LunchStart));
+                        row1.Add(CreateInlineStrCell(ns, "G1", "0", LunchFinish));
+                        row1.Add(CreateInlineStrCell(ns, "H1", "0", LunchEffective.ToString("yyyy-MM-dd")));
 
                         sheetData.Elements(ns + "row").Where(r => ((int?)r.Attribute("r") ?? 0) >= 5).Remove();
                         var m = Summary(chosen.Year, chosen.Month);
@@ -1444,6 +1485,8 @@ namespace WorkTimeApp
             inlineTimeEditor.Bounds = editingStart ? GetStartTimeRect() : GetFinishTimeRect();
             LayoutInlineEditor();
         }
+
+        internal bool IsEditingTime => inlineTimeEditor.Visible;
 
         private void SaveInlineTime()
         {
@@ -2173,24 +2216,33 @@ namespace WorkTimeApp
                     g.DrawString(dt.Day.ToString(), fontDay, brushDay, new PointF(rect.X + Dpi.S(6), rect.Y + Dpi.S(4)));
                 }
 
-                // Tag Badge (休 / 班)
+                // Explicit attendance kinds take precedence over calendar defaults.
                 string tag = HolidayService.GetDayTag(dt);
+                if (store != null && store.Records.TryGetValue(dt.Date, out var taggedEntry)
+                    && !string.IsNullOrWhiteSpace(taggedEntry.Kind) && taggedEntry.Kind != "自动")
+                    tag = taggedEntry.Kind;
                 if (!string.IsNullOrEmpty(tag) && inCurrentMonth)
                 {
-                    bool isHolidayTag = tag == "休";
-                    Color tBg = isHolidayTag ? ColorTranslator.FromHtml("#FEE2E2") : ColorTranslator.FromHtml("#DBEAFE");
-                    Color tFg = isHolidayTag ? ColorTranslator.FromHtml("#DC2626") : ColorTranslator.FromHtml("#1D4ED8");
-                    int tagW = Dpi.S(20);
+                    bool leaveTag = tag == "休" || tag == "法定休假" || tag == "年假" || tag == "事假" || tag == "病假" || tag == "调休";
+                    string tagBg = leaveTag ? "#FEF2F2" : "#DBEAFE";
+                    string tagFg = leaveTag ? "#B91C1C" : "#1D4ED8";
+                    if (tag == "出差") { tagBg = "#F5F3FF"; tagFg = "#6D28D9"; }
+                    if (tag == "加班") { tagBg = "#FFF7ED"; tagFg = "#C2410C"; }
+                    if (tag == "出勤") { tagBg = "#F0FDF4"; tagFg = "#15803D"; }
+                    Color tBg = ColorTranslator.FromHtml(tagBg);
+                    Color tFg = ColorTranslator.FromHtml(tagFg);
+                    int tagW;
+                    using (var measureFont = UiHelper.DrawingFont(this, 8f, FontStyle.Bold))
+                        tagW = Math.Min(Math.Max(Dpi.S(20), TextRenderer.MeasureText(tag, measureFont, Size.Empty, UiHelper.TextFlags).Width + Dpi.S(6)), Math.Max(1, rect.Width - Dpi.S(28)));
                     int tagH = Dpi.S(16);
                     var tagRect = new Rectangle(rect.Right - tagW - Dpi.S(6), rect.Y + Dpi.S(4), tagW, tagH);
                     using (var tPath = UiHelper.GetRoundedPath(tagRect, 3))
                     using (var tb = new SolidBrush(tBg))
                     using (var tf = new SolidBrush(tFg))
-                    using (var tFont = UiHelper.DrawingFont(this, 8f, FontStyle.Bold))
+                    using (var tFont = UiHelper.FitDrawingFont(this, tag, 8f, FontStyle.Bold, new Size(Math.Max(1, tagW - Dpi.S(4)), tagH)))
                     {
                         g.FillPath(tb, tPath);
-                        var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                        g.DrawString(tag, tFont, tf, tagRect, sf);
+                        TextRenderer.DrawText(g, tag, tFont, tagRect, tFg, UiHelper.TextFlags | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                     }
                 }
 
@@ -2251,6 +2303,84 @@ namespace WorkTimeApp
                     ControlPaint.DrawFocusRectangle(g, focusRect, ColorTranslator.FromHtml("#1D4ED8"), bg);
                 }
             }
+        }
+    }
+
+    public sealed class MorningPunchDialog : Form
+    {
+        public MorningPunchDialog(Action save, bool finish = false, Action<int> postpone = null)
+        {
+            Text = finish ? "下班打卡提醒" : "上班打卡提醒";
+            ClientSize = new Size(360, 208);
+            AutoScaleMode = AutoScaleMode.Dpi;
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            BackColor = Color.White;
+            Padding = new Padding(16);
+            var punch = new Button { Text = finish ? "下班打卡" : "打卡", Dock = DockStyle.Fill,
+                FlatStyle = FlatStyle.Flat, BackColor = ColorTranslator.FromHtml("#2563EB"),
+                ForeColor = Color.White, Font = new Font("Microsoft YaHei UI", 32f, FontStyle.Bold), Cursor = Cursors.Hand };
+            punch.FlatAppearance.BorderSize = 0;
+            punch.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml("#1D4ED8");
+            punch.FlatAppearance.MouseDownBackColor = ColorTranslator.FromHtml("#1E40AF");
+            Controls.Add(punch);
+            if (finish)
+            {
+                ClientSize = new Size(360, 256);
+                var actions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 44, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 8, 0, 0) };
+                var later = new Button { Text = "稍后提醒 ▾", Width = 150, Height = 32, FlatStyle = FlatStyle.Flat, BackColor = Color.White };
+                later.FlatAppearance.BorderSize = 0;
+                var menu = new ContextMenuStrip();
+                foreach (int minutes in new[] { 30, 60, 120, 180 })
+                {
+                    int delay = minutes;
+                    var option = new ToolStripMenuItem(minutes == 30 ? "30 分钟后" : (minutes / 60) + " 小时后");
+                    option.Click += (s, e) =>
+                    {
+                        try { postpone(delay); DialogResult = DialogResult.Retry; Close(); }
+                        catch (Exception ex) { MessageBox.Show(this, "保存提醒失败：" + ex.Message); }
+                    };
+                    menu.Items.Add(option);
+                }
+                later.Click += (s, e) => menu.Show(later, new Point(0, later.Height));
+                var dismiss = new Button { Text = "今天不再提醒", Width = 150, Height = 32, FlatStyle = FlatStyle.Flat, BackColor = Color.White };
+                dismiss.FlatAppearance.BorderSize = 0;
+                dismiss.Click += (s, e) => Close();
+                actions.Controls.Add(later);
+                actions.Controls.Add(dismiss);
+                Controls.Add(actions);
+                actions.SendToBack();
+                FormClosed += (s, e) => menu.Dispose();
+                punch.EnabledChanged += (s, e) => actions.Enabled = punch.Enabled;
+            }
+            AcceptButton = punch;
+            punch.Click += async (s, e) =>
+            {
+                punch.Enabled = false;
+                punch.Text = "保存中…";
+                punch.BackColor = ColorTranslator.FromHtml("#16A34A");
+                try
+                {
+                    // Let the green submitting state paint before synchronous local storage.
+                    await System.Threading.Tasks.Task.Delay(100);
+                    save();
+                    DialogResult = DialogResult.OK;
+                    Close();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "打卡失败：" + ex.Message, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    punch.Text = finish ? "下班打卡" : "打卡";
+                    punch.BackColor = ColorTranslator.FromHtml("#2563EB");
+                    punch.Enabled = true;
+                }
+            };
+            KeyPreview = true;
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape && punch.Enabled) Close(); };
+            FormClosing += (s, e) => { if (!punch.Enabled && DialogResult != DialogResult.OK) e.Cancel = true; };
         }
     }
 
@@ -2441,9 +2571,36 @@ namespace WorkTimeApp
         }
     }
 
+    internal sealed class SettingsActionButton : Button
+    {
+        private bool hovered;
+        internal bool Primary;
+        public SettingsActionButton() { DoubleBuffered = true; FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; Cursor = Cursors.Hand; }
+        protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hovered = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Parent?.BackColor ?? Color.White);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var path = UiHelper.GetRoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), Math.Max(4, DeviceDpi / 24)))
+            using (var brush = new SolidBrush(ColorTranslator.FromHtml(Primary ? hovered ? "#1D4ED8" : "#2563EB" : hovered ? "#F3F4F6" : "#FFFFFF")))
+            {
+                e.Graphics.FillPath(brush, path);
+                if (!Primary) using (var pen = new Pen(ColorTranslator.FromHtml("#D1D5DB"))) e.Graphics.DrawPath(pen, path);
+            }
+            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, Enabled ? Primary ? Color.White : ColorTranslator.FromHtml("#374151") : SystemColors.GrayText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
+        }
+    }
+
     // Settings Dialog with Integrated Excel & Backup Quick Links
     public class SettingsForm : DpiAwareForm
     {
+        private CheckBox lunchCheck;
+        private TextBox lunchStartBox, lunchFinishBox;
+        public bool LunchEnabled => lunchCheck.Checked;
+        public string LunchStart => lunchStartBox.Text.Trim();
+        public string LunchFinish => lunchFinishBox.Text.Trim();
         private readonly DpiMetrics Dpi;
         public double DailyTarget { get; private set; }
         public string StandardStart { get; private set; }
@@ -2456,8 +2613,6 @@ namespace WorkTimeApp
         private Button btnOpenExcel;
         private Button btnOpenFolder;
         private Button btnBackupFolder;
-        private Label lblStorageTip;
-        private ToolTip settingsToolTip;
         private Button btnOk;
         private Button btnCancel;
 
@@ -2472,115 +2627,87 @@ namespace WorkTimeApp
             InitializeComponent();
         }
 
+        private void AddSettingsLabel(string text, int x, int y, int w, int h, float pixels, bool bold = false, bool muted = false)
+        {
+            Controls.Add(new Label { Text = text, Location = Dpi.P(x,y), Size = Dpi.S(w,h), Font = UiHelper.DrawingFont(this, pixels * .75f, bold ? FontStyle.Bold : FontStyle.Regular), ForeColor = ColorTranslator.FromHtml(muted ? "#6B7280" : bold ? "#111827" : "#1F2937") });
+        }
+        private TextBox AddSettingsInput(string text, int x, int y, int width)
+        {
+            var box = new TextBox { Text = text, BorderStyle = BorderStyle.None, AutoSize = false, TextAlign = HorizontalAlignment.Center, Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular) };
+            var frame = new Panel { Location = Dpi.P(x,y), Size = Dpi.S(width,32), BackColor = Color.White };
+            box.SetBounds(Dpi.S(5), Dpi.S(6), Dpi.S(width-10), Dpi.S(22));
+            frame.Controls.Add(box);
+            frame.Paint += (s,e) => { using(var path = UiHelper.GetRoundedPath(new Rectangle(0,0,frame.Width-1,frame.Height-1),Dpi.S(4))) using(var pen = new Pen(ColorTranslator.FromHtml(box.Focused ? "#2563EB" : "#D1D5DB"))) e.Graphics.DrawPath(pen,path); };
+            box.GotFocus += (s,e) => frame.Invalidate(); box.LostFocus += (s,e) => frame.Invalidate();
+            Controls.Add(frame); return box;
+        }
+        private Button AddSettingsButton(string text, int x, int y, int w, int h, bool primary = false)
+        {
+            var button = new SettingsActionButton { Text = text, Location = Dpi.P(x,y), Size = Dpi.S(w,h), Primary = primary };
+            button.Font = UiHelper.DrawingFont(this,10.5f,FontStyle.Regular);
+            button.BackColor = primary ? ColorTranslator.FromHtml("#2563EB") : Color.White;
+            button.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#D1D5DB");
+            button.FlatAppearance.BorderSize = primary ? 0 : 1;
+            button.FlatAppearance.MouseOverBackColor = ColorTranslator.FromHtml(primary ? "#1D4ED8" : "#F3F4F6");
+            Controls.Add(button); return button;
+        }
+        private void OpenSettingsPath(string path)
+        {
+            try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
+            catch(Exception ex) { MessageBox.Show(this,"无法打开：" + ex.Message); }
+        }
         private void InitializeComponent()
         {
-            this.Text = "设置";
-            this.Font = UiHelper.DrawingFont(this, 9.5f, FontStyle.Regular);
-            this.BackColor = Color.White;
-            this.ForeColor = ColorTranslator.FromHtml("#1E293B");
-            this.ClientSize = Dpi.S(360, 410);
-            this.FormBorderStyle = FormBorderStyle.FixedDialog;
-            this.MaximizeBox = false;
-            this.MinimizeBox = false;
-            this.StartPosition = FormStartPosition.CenterParent;
-            this.ShowInTaskbar = false;
-
-            var lblRulesSection = new Label
-            {
-                Text = "考勤规则",
-                Location = Dpi.P(24, 12),
-                AutoSize = true,
-                Font = UiHelper.DrawingFont(this, 10f, FontStyle.Bold)
-            };
-            var lbl1 = new Label { Text = "每日目标工时 (h):", Location = Dpi.P(24, 42), Size = Dpi.S(165, 24), TextAlign = ContentAlignment.MiddleLeft };
-            txtTarget = new TextBox { Text = DailyTarget.ToString(CultureInfo.InvariantCulture), Location = Dpi.P(200, 40), Size = Dpi.S(125, 24), TextAlign = HorizontalAlignment.Center };
-            var lblTargetHelp = new Label
-            {
-                Text = "用于计算本月目标工时和完成比例。",
-                Location = Dpi.P(24, 66),
-                Size = Dpi.S(310, 20),
-                ForeColor = ColorTranslator.FromHtml("#64748B"),
-                Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular)
-            };
-
-            var lbl2 = new Label { Text = "标准上班时间:", Location = Dpi.P(24, 94), Size = Dpi.S(165, 24), TextAlign = ContentAlignment.MiddleLeft };
-            txtStdStart = new TextBox { Text = StandardStart, Location = Dpi.P(200, 94), Size = Dpi.S(125, 24), TextAlign = HorizontalAlignment.Center };
-
-            var lbl3 = new Label { Text = "标准下班时间:", Location = Dpi.P(24, 128), Size = Dpi.S(165, 24), TextAlign = ContentAlignment.MiddleLeft };
-            txtStdFinish = new TextBox { Text = StandardFinish, Location = Dpi.P(200, 128), Size = Dpi.S(125, 24), TextAlign = HorizontalAlignment.Center };
-            var lblStandardTimeHelp = new Label
-            {
-                Text = "标准时间仅保存设置，不会自动打卡或修改记录。",
-                Location = Dpi.P(24, 154),
-                Size = Dpi.S(310, 38),
-                ForeColor = ColorTranslator.FromHtml("#64748B"),
-                Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular)
-            };
-            var separator = new Label
-            {
-                BorderStyle = BorderStyle.Fixed3D,
-                Location = Dpi.P(24, 197),
-                Size = Dpi.S(310, 2)
-            };
-            var lblDataSection = new Label
-            {
-                Text = "数据管理",
-                Location = Dpi.P(24, 205),
-                AutoSize = true,
-                Font = UiHelper.DrawingFont(this, 10f, FontStyle.Bold)
-            };
-
-            // Quick utility shortcuts with generous widths
-            btnOpenExcel = UiHelper.CreateButton(this, "打开 Excel 表格", Dpi.P(24, 232), Dpi.S(145, 34));
-            btnOpenExcel.Click += (s, e) =>
-            {
-                try
-                {
-                    if (File.Exists(store.BookPath)) Process.Start(new ProcessStartInfo(store.BookPath) { UseShellExecute = true });
-                }
-                catch (Exception ex) { MessageBox.Show("无法打开文件: " + ex.Message); }
-            };
-
-            btnOpenFolder = UiHelper.CreateButton(this, "打开数据文件夹", Dpi.P(180, 232), Dpi.S(145, 34));
-            btnOpenFolder.Click += (s, e) =>
-            {
-                try
-                {
-                    if (!Directory.Exists(store.FolderPath)) Directory.CreateDirectory(store.FolderPath);
-                    Process.Start(new ProcessStartInfo("explorer.exe", store.FolderPath) { UseShellExecute = true });
-                }
-                catch { }
-            };
-
-            btnBackupFolder = UiHelper.CreateButton(this, "打开备份文件夹", Dpi.P(24, 274), Dpi.S(145, 34));
-            btnBackupFolder.Click += (s, e) =>
-            {
-                try
-                {
-                    string bDir = Path.Combine(store.FolderPath, "backups");
-                    if (!Directory.Exists(bDir)) Directory.CreateDirectory(bDir);
-                    Process.Start(new ProcessStartInfo("explorer.exe", bDir) { UseShellExecute = true });
-                }
-                catch { }
-            };
-
-            lblStorageTip = new Label
-            {
-                Text = "数据位置：" + store.FolderPath,
-                Font = UiHelper.DrawingFont(this, 8.5f, FontStyle.Regular),
-                ForeColor = ColorTranslator.FromHtml("#64748B"),
-                Location = Dpi.P(24, 314),
-                Size = Dpi.S(310, 30),
-                AutoEllipsis = true,
-                AccessibleName = "数据保存位置",
-                AccessibleDescription = store.FolderPath
-            };
-            settingsToolTip = new ToolTip();
-            settingsToolTip.SetToolTip(lblStorageTip, store.FolderPath);
-
-            btnOk = UiHelper.CreateButton(this, "保存", Dpi.P(140, 360), Dpi.S(95, 34), true);
+            Text = "设置";
+            Font = UiHelper.DrawingFont(this, 10.5f, FontStyle.Regular);
+            BackColor = Color.White;
+            ForeColor = ColorTranslator.FromHtml("#1F2937");
+            ClientSize = Dpi.S(600, 500);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false; MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterParent;
+            ShowInTaskbar = false;
+            AddSettingsLabel("考勤规则", 24, 24, 552, 24, 15, true);
+            AddSettingsLabel("每日目标工时", 24, 62, 300, 22, 14);
+            AddSettingsLabel("用于计算本月目标工时和完成比例", 24, 88, 340, 20, 12, false, true);
+            txtTarget = AddSettingsInput(DailyTarget.ToString(CultureInfo.InvariantCulture), 496, 68, 80);
+            AddSettingsLabel("小时", 454, 73, 36, 22, 14);
+            AddSettingsLabel("标准工作时段", 24, 124, 300, 22, 14);
+            AddSettingsLabel("用于打卡提醒，不会自动打卡或修改记录", 24, 150, 350, 20, 12, false, true);
+            txtStdStart = AddSettingsInput(StandardStart, 388, 130, 80);
+            AddSettingsLabel("至", 474, 135, 20, 22, 14);
+            txtStdFinish = AddSettingsInput(StandardFinish, 496, 130, 80);
+            Controls.Add(new Label { BackColor = ColorTranslator.FromHtml("#E5E7EB"), Location = Dpi.P(24, 190), Size = Dpi.S(552, 1) });
+            AddSettingsLabel("数据管理", 24, 211, 552, 24, 15, true);
+            AddSettingsLabel("数据存储位置", 24, 247, 552, 22, 14);
+            var pathBox = AddSettingsInput(store.FolderPath, 24, 277, 376);
+            pathBox.ReadOnly = true; pathBox.TextAlign = HorizontalAlignment.Left;
+            pathBox.BackColor = ColorTranslator.FromHtml("#F9FAFB");
+            pathBox.Parent.BackColor = pathBox.BackColor;
+            pathBox.Left = Dpi.S(10); pathBox.Width -= Dpi.S(10);
+            btnOpenFolder = AddSettingsButton("打开数据文件夹", 412, 277, 164, 34);
+            btnOpenExcel = AddSettingsButton("打开 Excel 表格", 24, 323, 270, 34);
+            btnBackupFolder = AddSettingsButton("打开备份文件夹", 306, 323, 270, 34);
+            btnOpenFolder.Click += (s, e) => OpenSettingsPath(store.FolderPath);
+            btnOpenExcel.Click += (s, e) => OpenSettingsPath(store.BookPath);
+            btnBackupFolder.Click += (s, e) => { string folder = Path.Combine(store.FolderPath, "backups"); Directory.CreateDirectory(folder); OpenSettingsPath(folder); };
+            string version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "1.0.0-beta.2";
+            AddSettingsLabel("当前版本 " + version, 24, 402, 190, 24, 12, false, true);
+            var update = new LinkLabel { Text = "检查更新", Location = Dpi.P(216, 402), Size = Dpi.S(145, 24), Font = UiHelper.DrawingFont(this, 9f, FontStyle.Regular), LinkColor = ColorTranslator.FromHtml("#2563EB"), ActiveLinkColor = ColorTranslator.FromHtml("#1D4ED8"), LinkBehavior = LinkBehavior.HoverUnderline };
+            Controls.Add(update);
+            update.Click += async (s, e) => await AppUpdater.Check(this, update, version);
+            btnOk = AddSettingsButton("保存", 388, 396, 88, 32, true);
             btnOk.Click += (s, e) =>
             {
+                var lunchA = EditRecordDialog.ParseInputTime(LunchStart);
+                var lunchB = EditRecordDialog.ParseInputTime(LunchFinish);
+                if (!lunchA.HasValue || !lunchB.HasValue || lunchB <= lunchA)
+                {
+                    MessageBox.Show(this, "午休结束时间须晚于开始时间，例如 12:00 至 13:00。", "输入有误");
+                    return;
+                }
+                lunchStartBox.Text = lunchA.Value.ToString(@"hh\:mm");
+                lunchFinishBox.Text = lunchB.Value.ToString(@"hh\:mm");
                 if (!double.TryParse(txtTarget.Text.Trim(), NumberStyles.Float, CultureInfo.CurrentCulture, out double dt) ||
                     double.IsNaN(dt) || double.IsInfinity(dt) || dt <= 0 || dt > 24)
                 {
@@ -2615,10 +2742,30 @@ namespace WorkTimeApp
                 this.Close();
             };
 
-            btnCancel = UiHelper.CreateButton(this, "取消", Dpi.P(245, 360), Dpi.S(85, 34));
+            btnCancel = AddSettingsButton("取消", 488, 396, 88, 32);
             btnCancel.DialogResult = DialogResult.Cancel;
-
-            this.Controls.AddRange(new Control[] { lblRulesSection, lbl1, txtTarget, lblTargetHelp, lbl2, txtStdStart, lbl3, txtStdFinish, lblStandardTimeHelp, separator, lblDataSection, btnOpenExcel, btnOpenFolder, btnBackupFolder, lblStorageTip, btnOk, btnCancel });
+            foreach (Control control in Controls)
+                if (control.Top >= Dpi.S(190)) control.Top += Dpi.S(72);
+            ClientSize = Dpi.S(600, 524);
+            lunchCheck = new CheckBox { Text = "扣除午休", Checked = store.LunchEnabled, Location = Dpi.P(24, 190), Size = Dpi.S(160, 24) };
+            Controls.Add(lunchCheck);
+            AddSettingsLabel("仅扣重叠时段，今天起生效，历史工时不变", 44, 218, 336, 20, 12, false, true);
+            lunchStartBox = AddSettingsInput(store.LunchStart, 388, 194, 80);
+            AddSettingsLabel("至", 474, 199, 20, 22, 14);
+            lunchFinishBox = AddSettingsInput(store.LunchFinish, 496, 194, 80);
+            Action updateLunchState = () =>
+            {
+                foreach (var box in new[] { lunchStartBox, lunchFinishBox })
+                {
+                    box.Enabled = lunchCheck.Checked;
+                    box.BackColor = ColorTranslator.FromHtml(lunchCheck.Checked ? "#FFFFFF" : "#F3F4F6");
+                    box.ForeColor = ColorTranslator.FromHtml(lunchCheck.Checked ? "#1F2937" : "#9CA3AF");
+                    box.Parent.BackColor = box.BackColor;
+                    box.Parent.Invalidate();
+                }
+            };
+            lunchCheck.CheckedChanged += (s, e) => updateLunchState();
+            updateLunchState();
             this.AcceptButton = btnOk;
             this.CancelButton = btnCancel;
         }
@@ -2661,6 +2808,11 @@ namespace WorkTimeApp
 
         private Timer timerTicker;
         private Timer dayChangeTimer;
+        private Timer morningReminderTimer;
+        private DateTime remindedDay;
+        private bool showingMorningReminder;
+        private DateTime finishReminderDay;
+        private DateTime finishReminderNext;
         private DateTime displayedDay = DateTime.Today;
         private NotifyIcon notifyIcon;
         private ContextMenuStrip trayMenu;
@@ -2685,6 +2837,115 @@ namespace WorkTimeApp
             dayChangeTimer = new Timer { Interval = 10 * 60 * 1000 };
             dayChangeTimer.Tick += (s, e) => RefreshDayIfChanged();
             dayChangeTimer.Start();
+            try { DateTime.TryParseExact(File.ReadAllText(Path.Combine(store.FolderPath, "morning-reminder.txt")).Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out remindedDay); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            morningReminderTimer = new Timer { Interval = 30000 };
+            morningReminderTimer.Tick += (s, e) => CheckMorningReminder();
+            morningReminderTimer.Start();
+            Shown += (s, e) => CheckMorningReminder();
+            try
+            {
+                string[] saved = File.ReadAllLines(Path.Combine(store.FolderPath, "finish-reminder.txt"));
+                if (saved.Length == 2)
+                {
+                    DateTime.TryParseExact(saved[0], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out finishReminderDay);
+                    DateTime.TryParseExact(saved[1], "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out finishReminderNext);
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            morningReminderTimer.Tick += (s, e) => CheckFinishReminder();
+            Shown += (s, e) => CheckFinishReminder();
+        }
+
+        private void SaveFinishReminder(DateTime day, DateTime next)
+        {
+            File.WriteAllLines(Path.Combine(store.FolderPath, "finish-reminder.txt"), new[] { day.ToString("yyyy-MM-dd"), next.ToString("O") }, new UTF8Encoding(false));
+            finishReminderDay = day;
+            finishReminderNext = next;
+        }
+
+        internal static bool FinishReminderDue(DateTime now, Entry entry, string standardFinish, DateTime stateDay, DateTime next)
+        {
+            var finish = EditRecordDialog.ParseInputTime(standardFinish);
+            if (!finish.HasValue || !HolidayService.IsWorkday(now.Date) || entry == null || !entry.Start.HasValue || entry.Finish.HasValue) return false;
+            if (entry.Kind == "法定休假" || entry.Kind == "调休" || entry.Kind == "年假" || entry.Kind == "事假" || entry.Kind == "病假") return false;
+            if (stateDay.Date == now.Date) return next != DateTime.MinValue && now >= next;
+            DateTime scheduled = now.Date.Add(finish.Value);
+            return now >= scheduled && now < scheduled.AddHours(2);
+        }
+
+        private void CheckFinishReminder()
+        {
+            DateTime now = DateTime.Now;
+            store.Records.TryGetValue(now.Date, out var entry);
+            if (showingMorningReminder || !Enabled || todayPunchControl.IsEditingTime || !FinishReminderDue(now, entry, store.StandardFinish, finishReminderDay, finishReminderNext)) return;
+            try { SaveFinishReminder(now.Date, DateTime.MinValue); }
+            catch (IOException) { return; }
+            catch (UnauthorizedAccessException) { return; }
+            showingMorningReminder = true;
+            try
+            {
+                RestoreFromTray();
+                using (var reminder = new MorningPunchDialog(() =>
+                {
+                    if (DateTime.Today != now.Date) throw new InvalidOperationException("日期已变化，请在主界面补录。");
+                    store.Records.TryGetValue(now.Date, out var current);
+                    if (current == null || !current.Start.HasValue) throw new InvalidOperationException("缺少上班记录，请先补录。");
+                    if (!current.Finish.HasValue)
+                    {
+                        DateTime clicked = DateTime.Now;
+                        store.SaveDay(now.Date, current.Start, new TimeSpan(clicked.Hour, clicked.Minute, 0), current.Kind, current.Note);
+                    }
+                    RefreshTodayPunch(); RefreshMonthOverview(); calControl.Invalidate();
+                }, true, minutes => SaveFinishReminder(now.Date, DateTime.Now.AddMinutes(minutes)))) reminder.ShowDialog(this);
+            }
+            finally { showingMorningReminder = false; }
+        }
+
+        internal static bool MorningReminderDue(DateTime now, DateTime reminded, Entry entry, string standardStart)
+        {
+            TimeSpan? configuredStart = EditRecordDialog.ParseInputTime(standardStart);
+            if (!configuredStart.HasValue) return false;
+            DateTime reminderTime = now.Date.Add(configuredStart.Value);
+            return now >= reminderTime && now < reminderTime.AddHours(2)
+                && reminded.Date != now.Date && HolidayService.IsWorkday(now.Date)
+                && (entry == null || (!entry.Start.HasValue && (entry.Kind == "自动" || entry.Kind == "工作日" || entry.Kind == "出勤" || entry.Kind == "加班" || entry.Kind == "出差")));
+        }
+
+        private void CheckMorningReminder()
+        {
+            DateTime now = DateTime.Now;
+            store.Records.TryGetValue(now.Date, out var entry);
+            if (showingMorningReminder || !Enabled || !MorningReminderDue(now, remindedDay, entry, store.StandardStart)) return;
+            if (todayPunchControl.IsEditingTime) return;
+            try
+            {
+                File.WriteAllText(Path.Combine(store.FolderPath, "morning-reminder.txt"), now.ToString("yyyy-MM-dd"), new UTF8Encoding(false));
+            }
+            catch (IOException) { return; }
+            catch (UnauthorizedAccessException) { return; }
+            remindedDay = now.Date;
+            showingMorningReminder = true;
+            try
+            {
+                RestoreFromTray();
+                using (var reminder = new MorningPunchDialog(() =>
+                {
+                    if (DateTime.Today != now.Date) throw new InvalidOperationException("日期已变化，请在主界面打卡。");
+                    store.Records.TryGetValue(now.Date, out var current);
+                    if (current == null || !current.Start.HasValue)
+                    {
+                        DateTime clicked = DateTime.Now;
+                        store.SaveDay(now.Date, new TimeSpan(clicked.Hour, clicked.Minute, 0), current?.Finish, current?.Kind ?? "自动", current?.Note ?? "");
+                    }
+                    RefreshTodayPunch();
+                    RefreshMonthOverview();
+                    calControl.Invalidate();
+                })) reminder.ShowDialog(this);
+            }
+            finally { showingMorningReminder = false; }
         }
 
         private void InitializeComponent()
@@ -3178,7 +3439,7 @@ namespace WorkTimeApp
             {
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
-                    store.SaveConfig(dlg.DailyTarget, dlg.StandardStart, dlg.StandardFinish);
+                    store.SaveConfig(dlg.DailyTarget, dlg.StandardStart, dlg.StandardFinish, dlg.LunchEnabled, dlg.LunchStart, dlg.LunchFinish);
                     RefreshTodayPunch();
                     RefreshMonthOverview();
                 }
@@ -3324,6 +3585,7 @@ namespace WorkTimeApp
             {
                 if (timerTicker != null) timerTicker.Dispose();
                 if (dayChangeTimer != null) dayChangeTimer.Dispose();
+                if (morningReminderTimer != null) morningReminderTimer.Dispose();
                 if (notifyIcon != null) notifyIcon.Dispose();
                 if (trayMenu != null) trayMenu.Dispose();
                 if (toolTipTop != null) toolTipTop.Dispose();

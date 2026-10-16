@@ -3,6 +3,8 @@
 backups/
 待同步.json
 holidays.json
+/morning-reminder.txt
+/finish-reminder.txt
 
 # Build output
 bin/
