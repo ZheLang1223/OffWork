@@ -1,5 +1,5 @@
 #define AppName "下班了"
-#define AppVersion "1.0.0-beta.2"
+#define AppVersion "1.0.0-beta.3"
 #define AppExeName "下班了.exe"
 
 [Setup]

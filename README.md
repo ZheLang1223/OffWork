@@ -4,7 +4,7 @@
 
 ## 安装
 
-1. 在本仓库的 [Releases 页面](https://github.com/ZheLang1223/OffWork/releases)下载 `OffWork-Setup.exe`。当前测试版为 `v1.0.0-beta.2`。
+1. 在本仓库的 [Releases 页面](https://github.com/ZheLang1223/OffWork/releases)下载 `OffWork-Setup.exe`。当前测试版为 `v1.0.0-beta.3`。
 2. 双击安装，可选择创建桌面快捷方式。
 3. 从开始菜单或桌面启动“下班了”。
 
